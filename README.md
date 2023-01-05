@@ -75,6 +75,8 @@ sudo apt-get install redis
 
 ```shell
 sudo service redis-server start
+
+redis-cli 
 ```
 
 وارد محیط cli (command line interface) ردیس شوید
@@ -103,7 +105,7 @@ SET key value
 
 ```python
 dictionary = dict()
-dictionary[key] = value
+dictionary["key"] = "value"
 ```
 می باشد
 
