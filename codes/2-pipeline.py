@@ -61,5 +61,5 @@ r.bgsave()  # it will put save command into a queue if other commands has receiv
 
 keys = r.keys()
 
-for key in keys:
+for key in keys:   # Careful on a big DB. keys() is O(N). todo: set reference to linked lists here
     print(r.hgetall(key))
