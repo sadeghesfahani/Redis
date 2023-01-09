@@ -310,3 +310,162 @@ with r.pipeline() as pip:
     [pip.hmset(h_id, hat) for h_id, hat in hats.items()]  # note that hmset is deprecated
     pip.execute()
 ```
+
+
+# Race condition
+
+تصور کنید که من و شما میخواییم یک آیفون ۱۴ پرومکس ۲۵۶ گیگ بخریم. آقا تصور کن دیگه حالا مثلا ما پولداریم دیگه. به دلیل مشکلات تحریمی و قیمت بالا و ممنوعیت فروش دیجیکالا فقط یکی از این گوشی رو موجود داره. جفت ما وارد اکانتمون میشیم، این گوشی رو وارد کیفمون می کنیم. تا یکی از ما دوتا پرداخت رو انجام نده، دیجیکالا موجودی اون رو صفر نمی کنه. فرض کنید به طور هم زمان ما شروع به پرداخت می کنیم. پرداخت های ما همزمان انجام میشه. عملیات کم کردن تعداد گوشی بعد از پرداخت برای ما اجرا میشه. همزمان ما وارد این فانگشن شدیم، اول خرید من انجام میشه و میرم و موجودی این گوشی رو صفر می کنم، حالا نوبت شماست که برید و موجودی گوشی رو صفر کنید ولی قبلا صفر شده، اصلا نمیتونه برای شما این سفارش رو ثبت کنه. با اینکه شما پرداخت رو انجام دادید ولی واقعا گوشی ای نمونده که شما بخرید. به این حالت میگن ریس کاندیشن.
+
+برای جلوگیری از ریس کاندیشن ها در مواقعی مثل همین خرید کالا،‌ ما از مفهومی استفاده می کنیم به نام atomicity. خلاصه این مفهوم یعنی یا همه یا هیچکس، به طور مثال، فرض کنید در مثال بالا خرید شما که به دلیل عدم موجودی کامل نشده، طبق این مفهوم باید برگشت بخوره و پول به حساب شما برگرده، این خرید که به لیست خرید های شما در دیتابیس اضافه شده باید بازگشت بخوره، امتیازی که از این خرید دریافت کردید باید بازگشت بخوره و و و. یعنی چون عملیات شما با خطا مواجه شده تمام تغییراتی که تا اون جای کد رخ داده باید رول بک (بازگشت) بخورن.
+
+این مفهوم در جنگو رست فریمورک رفتار پیشفرض جنگو است، یعنی اگر دی حین کار روی یک ویو کلی تغییر ایجاد کرده باشید، کلی چیز توی دیتابیس ساخته باشید، اگر جایی از کد به خطا بخوره تمام تغییرات به قبل بازگشت میخورن.
+
+برای اینکه یک ویوو رو اتمیک بکنیم به صورت زیر عمل می کنیم.
+
+```python
+from django.db import transaction
+
+@transaction.atomic
+def viewfunc(request):
+    # This code executes inside a transaction.
+    do_stuff()
+```
+
+برای مطالعه کامل این مفهوم در جنگو از این لینک استفاده کنید
+https://docs.djangoproject.com/en/4.1/topics/db/transactions/
+
+ردیس هم مانند هر دیتابیس دیگری با این ریس کاندیشن مواجه میشه که باید قابلیت اتمیک بودن رو برای اون داشته باشیم که داریم.
+
+در ردیس برای نمایش اینکه یا همه یا هیچکدوم باید اجرا بشه از دستور multi و بعدش exec استفاده می کنیم.
+
+```redis
+127.0.0.1:6379> MULTI
+127.0.0.1:6379> HINCRBY hashTableName quantity -1   # HINCRBY will increase a hashtable value for a specific field
+127.0.0.1:6379> HINCRBY hashTableName npurchased 1  # like HINCRBY hashTableName field howMuchShouldIncrease
+127.0.0.1:6379> EXEC
+```
+
+در دستور بالا اگر خطایی در یکی از دو خط به وجود بیاد، تغییر ایجاد شده روی آن یکی به حالت قبل بر میگرده.
+
+در حالتی هم میتونیم به ردیس بگیم اگر در هنگام عملیاتی بودیم و برای اون فیلدی که ما نیاز داریم تغییری ایجاد شد، عملیات رو متوقف کن، همه تغییرات رو رول بک کن و عملیات رو از اول انجام بده.
+این عملیات در ردیس با استفاده از مفهومی به نام فقل کردن خوش بینانه انجام میشه که برای اطلاعات بیشتر میتونید به این لینک مراجعه کنید:
+https://en.wikipedia.org/wiki/Optimistic_concurrency_control
+
+این رفتار در redis-py با استفاده از دستور watch() قابل پیاده سازیست.
+
+به این مثال دقت کنید
+
+```python
+import logging
+import redis
+
+logging.basicConfig()
+
+
+class OutOfStockError(Exception):
+    """Raised when PyHats.com is all out of today's hottest hat"""
+
+
+def buy_item(r: redis.Redis, itemid: str) -> None:
+    with r.pipeline() as pipe:
+        error_count = 0
+        while True:
+            try:
+                # Get available inventory, watching for changes
+                # related to this itemid before the transaction
+                pipe.watch(itemid)
+                number_left: bytes = r.hget(itemid, "quantity")
+                if number_left > b"0":
+                    pipe.multi()
+                    pipe.hincrby(itemid, "quantity", -1)
+                    pipe.hincrby(itemid, "npurchased", 1)
+                    pipe.execute()
+                    break
+                else:
+                    # Stop watching the itemid and raise to break out
+                    pipe.unwatch()
+                    raise OutOfStockError(
+                        f"Sorry, {itemid} is out of stock!"
+                    )
+            except redis.WatchError:
+                # Log total num. of errors by this user to buy this item,
+                # then try the same process again of WATCH/HGET/MULTI/EXEC
+                error_count += 1
+                logging.warning(
+                    "WatchError #%d: %s; retrying",
+                    error_count, itemid
+                )
+    return None
+
+```
+
+# کاربردها
+
+## کش کردن
+یکی از کاربردهای مهم ردیس در کش کردن داده هاست. این کش کردن در اپلیکیشن های غیر جنگویی میتونه مانند همین ساختن هش تیبیل و ست و گت ساده صورت بگیره، اما در جنگو کار برای ما ساده تر شده.
+برای استفاده از سیستم کشینگ ردیس لازمه ابتدا روی تنظیمات جنگومون این خطوط رو اضافه کنیم:
+
+```python
+
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": "redis://redis:6379/1", # this is gonna be diffrent based on using redis on docker or on system
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient"
+        },
+        "KEY_PREFIX": "example"  # this is a prefix will be used for assigning keys to redis
+    }
+}
+```
+و پکیج های زیر رو نصب کنیم:
+```text
+redis
+django-redis
+```
+
+و حالا جنگو ما آماده استفاده از سیستم کشینگ ردیسه.
+
+### کش کردن مقدار
+
+در حالت هایی که خروجی ما وابستگی به پارامتر های ورودی کاربر دارد،‌ مثلا پارامتر های گت و یا پست که به سمت سرور ارسال می شود، میتونیم با استفاده از ترکیب این کلیدها با هم عباراتی رو تولید کنیم و اون هارو کش کنیم
+
+به مثال زیر دقت کنید:
+
+```python
+from django.core.cache import cache
+from rest_framework import viewsets
+from .model import Country
+
+class CountryView(viewsets.ViewSet):
+    def get_country(self, request):
+        language = request.GET.get("lang")
+        countries = Country.objects.all()
+        cached_result = cache.get(f"countries-{language}")
+        if cached_result:
+            return cached_result
+        
+        translated_countries = self.__translate_country_names(countries,language)
+        cache.set(f"countries-{language}", translated_countries, timeout=60 * 60 * 24)
+        return translated_countries
+
+
+    @staticmethod
+    def __translate_country_names(countries, language):
+        pass  # do the translation logic here
+```
+
+اگر پارامتر های ورودی کاربر تاثیری در محاسبات ما نداره اما همچنان محاسبات ما سنگین و زمانبر هستند میتونیم از دستور دیگه ای برای کش کردن کل صفحه استفاده کنیم:
+
+به مثال زیر دقت کنید:
+
+```python
+from django.views.decorators.cache import cache_page
+
+@cache_page(60 * 15)
+def my_view(request):
+    ...
+```
+
+برای مطالعه تکمیلی به آدرس زیر مراجعه کنید:
+https://docs.djangoproject.com/en/4.1/topics/cache/
