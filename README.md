@@ -469,3 +469,91 @@ def my_view(request):
 
 برای مطالعه تکمیلی به آدرس زیر مراجعه کنید:
 https://docs.djangoproject.com/en/4.1/topics/cache/
+
+برای کش کردن سشن ها هم میشه از ردیس استفاده کرد. برای اینکار نیاز به لایبرری دارید. ابتدا 
+```
+pip install django-redis-sessions
+```
+این بسته رو نصب کنید سپس در فایل تنظیمات
+```python
+SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
+```
+این تنظیمات رو اضافه کنید.
+
+### Observer
+
+یکی دیگه از کاربردهایی که میشه از اون در ردیس استفاده کرد مفهومی به نام تماشاگر هست، این یکی از الگوهای طراحیه که باعث میشه یک طرف بتونه طرف دیگه رو از تغییرات آگاه کنه. برای این منظور ما یک مشاهده کننده داریم و یک مبنع که مشاهده کننده هارو از تغییرات آگاه می کنه. اگر بخواییم فرم پایتونی این مفهوم رو بررسی کنیم چیزی شبیه به این مثال میشه.
+
+```python
+class Observer:
+
+    def __init__(self, name):
+        self.name = name
+
+    def notify(self, message):
+        print(self.name, " ", message)
+
+
+class SomethingLikeRedis:
+    observers = []
+
+    @staticmethod
+    def subscribe(observer):
+        SomethingLikeRedis.observers.append(observer)
+
+    @staticmethod
+    def publish(message):
+        for observer in SomethingLikeRedis.observers:
+            observer.notify(message)
+
+
+publisher = SomethingLikeRedis()
+subscriber1 = Observer("sub1")
+subscriber2 = Observer("sub2")
+
+publisher.subscribe(subscriber1)
+publisher.subscribe(subscriber2)
+
+publisher.publish("here we are")
+```
+
+برای مشاهده توضیحات کامل همراه با مثال این الگو طراحی به آدرس زیر مراجعه کنید:
+https://github.com/sadeghesfahani/head-first-design-pattern/tree/main/observer
+
+این یک مفهوم بسیار پرکاربرد است که در انگولار و ری اکت به شکل گسترده مورد استفاده قرار میگیرد. در بک اند به دلیل اینکه اجرا شدن برنامه های نوشته شده در زمان لایف سایکل رکوئست ما هستند، عملا این مفهوم بدون کمک یک واسط اجرا نشدنیه. ردیس برای ما این مفهوم رو در بک اند قابل اجرا می کند. از جمله کاربرد های این مفهوم میشه به پیاده سازی میکروسرویس ها و وب ساکت ها اشاره کرد.
+
+برای پیاده سازی این مفهوم با استفاده از ردیس کافی است در یک طرف به یک کانال مشخص سابسکرایب کنیم و در طرف دیگه چیزی رو پابلیش کنیم.
+
+
+سمت دریافت کننده:
+
+```python
+import redis
+
+re = redis.Redis()
+
+def get_data():
+    pubsub = re.pubsub()
+    pubsub.subscribe("channel_name")
+    for message in pubsub.listen():
+        print(message)
+
+
+while True:
+    get_data()
+
+```
+
+سمت ارسال کننده:
+
+```python
+import redis
+
+re = redis.Redis()
+pubsub = re.pubsub()
+
+
+for i in range(10):
+    re.publish("channel_name", i)
+
+```
